@@ -1,5 +1,6 @@
 import json
 import os
+import collections
 from shutil import copyfile
 from typing import List, Dict
 
@@ -146,7 +147,30 @@ class ShardHandler(object):
         """Loads the data from all shards, removes the extra 'database' file,
         and writes the new number of shards to disk.
         """
-        pass
+        data = self.load_data_from_shards()
+        self.mapping = self.load_map()
+        max_key = max([int( key_.split('-')[0] ) for key_ in self.get_all_shard_data().keys()] )
+        
+        end_shard = self.get_shard_data( str(max_key) )
+        self.mapping.pop(str(max_key) )
+
+
+        
+        keys = [int(z) for z in self.get_shard_ids()]
+        keys.sort()
+        new_shard_num = max(keys) + 1
+
+        spliced_data = self._generate_sharded_data(new_shard_num, data)
+
+        dir_ = os.getcwd()
+        os.remove(dir_ + "/data/" + str(max_key) + ".txt")
+
+        for num, d in enumerate(spliced_data):
+            self._write_shard(num, d)
+
+        self.write_map()
+
+        self.sync_replication()
 
     def add_replication(self) -> None:
         """Add a level of replication so that each shard has a backup. Label
@@ -163,7 +187,37 @@ class ShardHandler(object):
         to detect how many levels there are and appropriately add the next
         level.
         """
-        pass
+        self.mapping = self.load_map()
+        keys = [int(z) for z in self.get_shard_ids()]
+        keys.sort()
+        shard_num = max(keys)
+        print(keys)
+        key_rep = collections.defaultdict(int)
+        for keyi in keys:
+            key_rep[keyi] = max(key_rep[keyi],0)
+        
+        keys = [(int(i),int(j)) for i,j in [i.split('-') for i in self.get_replication_ids()]]
+        for i,j in keys:
+            key_rep[i] = max(key_rep[i],j)
+        data = self.load_data_from_shards()
+        for key in key_rep:
+            num = str(key) + "-" + str(key_rep[key] + 1)
+            self._write_shard_mapping(num, data, True)
+        print(self.mapping)
+
+        # spliced_data = self._generate_sharded_data(shard_num, data)
+        dir_ = os.getcwd()
+        for key in self.mapping.keys():
+            print(key)
+            if "-" in str(key):
+                with open(dir_ + '/data/' + key + ".txt", 'w'):
+                    source = dir_ + '/data/' + key[:key.index("-")] + ".txt"
+                    destination = dir_ + '/data/' + key + ".txt"
+                    copyfile(source, destination)
+
+        self.write_map()
+
+        self.sync_replication()
 
     def remove_replication(self) -> None:
         """Remove the highest replication level.
@@ -186,13 +240,73 @@ class ShardHandler(object):
         2.txt (shard 2, primary)
         etc...
         """
-        pass
+        self.mapping = self.load_map()
+        keys = [int(z) for z in self.get_shard_ids()]
+        keys.sort()
+        shard_num = max(keys)
+        key_rep = collections.defaultdict(int)
+        for keyi in keys:
+            key_rep[keyi] = max(key_rep[keyi],0)
+        
+        keys = [(int(i),int(j)) for i,j in [i.split('-') for i in self.get_replication_ids()]]
+        for i,j in keys:
+            key_rep[i] = max(key_rep[i],j)
+        
+        dir_ = os.getcwd()
+        for key in key_rep:
+            if key_rep[key]:
+                os.remove(dir_ + "/data/" + str(key) + "-" + str(key_rep[key]) + ".txt")
+                shard = str(key) + "-" + str(key_rep[key])
+                self.mapping.pop(shard)
+            
+            else:
+                raise(NameError("There is nothing left to remove!"))
+
+        self.write_map()
+
+        self.sync_replication()
 
     def sync_replication(self) -> None:
         """Verify that all replications are equal to their primaries and that
         any missing primaries are appropriately recreated from their
         replications."""
-        pass
+
+        self.mapping = self.load_map()
+        dir_ = os.getcwd()
+        files = {}
+        max_rep = 0
+        for key in self.mapping.keys():
+            primary = key
+            secondary = 0
+            if '-' in key:
+                primary = key.split('-')[0]
+                secondary = int(key.split('-')[1])
+                max_rep = max(max_rep, secondary)
+            if primary not in files:
+                files[primary] = {'all_keys':set(), 'filename': '', 'max_rep':secondary} 
+            files[primary]['all_keys'].add(key)
+            files[primary]['max_rep'] = max(files[primary]['max_rep'], secondary)
+            if os.path.exists(dir_ + '/data/' + key + ".txt"):
+                files[primary]['filename'] = dir_ + '/data/' + key + ".txt"
+                files[primary]['all_keys'].remove(key)
+
+        for primary in files:
+            for secondary in range(files[primary]['max_rep']+1, max_rep+1):
+                num = '-'.join([str(primary), str(secondary)])
+                files[primary]['all_keys'].add(num)
+                self._write_shard_mapping(num, '' , replication=True)
+
+        for primary in files:
+            source = files[primary]['filename']
+            for key in files[primary]['all_keys']:
+                destination = dir_ + '/data/' + key + ".txt"
+                copyfile(source, destination)
+        
+        
+
+        self.write_map()
+
+
 
     def get_shard_data(self, shardnum=None) -> [str, Dict]:
         """Return information about a shard from the mapfile."""
@@ -213,7 +327,11 @@ s = ShardHandler()
 s.build_shards(5, load_data_from_file())
 
 print(s.mapping.keys())
-
-s.add_shard()
+# s.add_shard()
+# s.remove_shard()
+# s.add_replication()
+# s.remove_replication()
+s.sync_replication()
+# print(s.mapping)
 
 print(s.mapping.keys())
